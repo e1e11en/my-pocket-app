@@ -10,7 +10,6 @@
                     <div class="stylus" :class="{ 'is-playing': isPlaying }">
                         <div class="stylus-pivot"></div>
                         <div class="stylus-arm"></div>
-                        <div class="stylus-head"></div>
                     </div>
                     <div class="disc" :class="{ 'rotate': isPlaying }">
                         <div class="disc-vinyl">
@@ -23,8 +22,8 @@
             </section>
 
             <section class="info-group">
-                <h1 class="song-name">{{ musicStore.currentTrack.title }}</h1>
-                <p class="artist">{{ musicStore.currentTrack.artist }}</p>
+                <h1 class="song-name">{{ musicStore.currentTrack.title || '未播放' }}</h1>
+                <p class="artist">{{ musicStore.currentTrack.artist || '未知艺术家' }}</p>
             </section>
 
             <section class="progress-bar-group">
@@ -39,17 +38,16 @@
 
             <section class="controls-group">
                 <div class="main-controls">
-
-
-                    <button class="btn-main" @click="musicStore.prevTrack()">
+                    <button class="btn-secondary" @click="deleteCurrentTrack">
+                        <i class="icon-delete"></i>
+                    </button>
+                    <button class="btn-main" @click="handlePrev">
                         <i class="icon-pre"></i>
                     </button>
-
                     <button class="btn-play-state" @click="togglePlay">
                         <div :class="isPlaying ? 'icon-pause' : 'icon-play'"></div>
                     </button>
-
-                    <button class="btn-main" @click="musicStore.nextTrack()">
+                    <button class="btn-main" @click="handleNext">
                         <i class="icon-next"></i>
                     </button>
                     <button class="btn-secondary" @click="showList = true">
@@ -69,10 +67,12 @@
                     <div class="list-items">
                         <div v-for="(item, index) in musicStore.playlist" :key="item.id" class="item"
                             :class="{ 'active': musicStore.currentIndex === index }">
+
                             <div class="item-info" @click="selectTrack(index)">
                                 <span class="item-title">{{ item.title }}</span>
                                 <span class="item-artist-sub">{{ item.artist }}</span>
                             </div>
+
                             <div class="item-right">
                                 <div v-if="musicStore.currentIndex === index" class="playing-bars">
                                     <span></span><span></span><span></span>
@@ -89,14 +89,14 @@
             </div>
         </Transition>
 
-        <audio ref="audioRef" @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="onEnded"></audio>
+        <audio ref="audioRef" @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="handleEnded"></audio>
     </div>
 </template>
 
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useMusicStore } from '../stores/music'
-import { get, set } from 'idb-keyval'
+import { get, set, del } from 'idb-keyval'
 
 const musicStore = useMusicStore()
 const audioRef = ref(null)
@@ -106,136 +106,141 @@ const currentTime = ref(0)
 const duration = ref(0)
 const defaultCover = 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=500'
 
+// 1. 修改加载逻辑：增加对 track.url (默认音乐) 的支持
 const loadTrackResource = async (index, shouldPlay = false) => {
     const track = musicStore.playlist[index]
     if (!track) return
-    const file = await get(`file_${track.id}`)
-    if (file) {
-        if (audioRef.value.src) URL.revokeObjectURL(audioRef.value.src)
-        audioRef.value.src = URL.createObjectURL(file)
-        audioRef.value.load()
-        if (shouldPlay) {
-            audioRef.value.play().catch(() => { })
-            isPlaying.value = true
-        } else {
-            isPlaying.value = false
+
+    // 如果有 url (默认音乐)，直接用；否则去 get 数据库
+    if (track.url) {
+        audioRef.value.src = track.url
+    } else {
+        const file = await get(`file_${track.id}`)
+        if (file) {
+            if (audioRef.value.src.startsWith('blob:')) URL.revokeObjectURL(audioRef.value.src)
+            audioRef.value.src = URL.createObjectURL(file)
         }
+    }
+
+    audioRef.value.load()
+    if (shouldPlay) {
+        audioRef.value.play().catch(() => { })
+        isPlaying.value = true
+    } else {
+        isPlaying.value = false
     }
 }
 
 const togglePlay = () => {
-    if (!audioRef.value.src) return alert('请先添加音乐')
-    isPlaying.value ? audioRef.value.pause() : audioRef.value.play()
+    if (!audioRef.value.src) return
+    isPlaying.value ? audioRef.value.pause() : audioRef.value.play().catch(() => { })
     isPlaying.value = !isPlaying.value
 }
 
-const selectTrack = (index) => {
-    musicStore.currentIndex = index
-    loadTrackResource(index, true)
+const handlePrev = () => {
+    if (musicStore.playlist.length <= 1) {
+        if (audioRef.value) { audioRef.value.currentTime = 0; audioRef.value.play().catch(() => { }); isPlaying.value = true; }
+    } else { musicStore.prevTrack() }
 }
 
+const handleNext = () => {
+    if (musicStore.playlist.length <= 1) {
+        if (audioRef.value) { audioRef.value.currentTime = 0; audioRef.value.play().catch(() => { }); isPlaying.value = true; }
+    } else { musicStore.nextTrack() }
+}
+
+const handleEnded = () => {
+    if (musicStore.playlist.length > 1) { musicStore.nextTrack() }
+    else { audioRef.value.currentTime = 0; audioRef.value.play() }
+}
+
+const selectTrack = (index) => { musicStore.currentIndex = index; loadTrackResource(index, true) }
+
 const handleUpload = async (e) => {
-    const file = e.target.files[0]
-    if (!file) return
-    const id = Date.now()
-    await set(`file_${id}`, file)
+    const file = e.target.files[0]; if (!file) return;
+    const id = Date.now(); await set(`file_${id}`, file);
+    // 上传的不带 url 属性
     musicStore.addTrack({ id, title: file.name.replace(/\.[^/.]+$/, ""), artist: '本地上传', cover: defaultCover })
 }
 
-const confirmDelete = (index) => {
-    if (musicStore.playlist.length === 0) return
-    if (confirm('确定要删除这首歌吗？')) {
-        musicStore.removeTrack(index)
-        if (musicStore.playlist.length === 0) {
-            audioRef.value.src = ''
-            isPlaying.value = false
-        }
-    }
+const deleteCurrentTrack = async () => { if (musicStore.playlist.length > 0) await confirmDelete(musicStore.currentIndex) }
+
+// 2. 修改删除逻辑：调用 store 内部的删除（内部已处理数据库逻辑）
+const confirmDelete = async (index) => {
+    if (index === musicStore.currentIndex) { if (audioRef.value) audioRef.value.pause(); isPlaying.value = false; }
+    await musicStore.removeTrack(index);
+    if (musicStore.playlist.length === 0) { audioRef.value.src = '' }
+    else { loadTrackResource(musicStore.currentIndex, false) }
 }
 
-watch(() => musicStore.currentIndex, (newIdx) => {
-    loadTrackResource(newIdx, isPlaying.value)
-})
+watch(() => musicStore.currentIndex, (newIdx) => loadTrackResource(newIdx, isPlaying.value))
 
+// 3. 修改挂载逻辑：强制重置状态，防止持久化插件导致初次不显示默认列表
 onMounted(() => {
-    if (musicStore.playlist.length > 0) loadTrackResource(musicStore.currentIndex, false)
+    if (musicStore.playlist.length > 0) {
+        loadTrackResource(musicStore.currentIndex, false)
+    }
 })
 
 const onTimeUpdate = () => { currentTime.value = audioRef.value.currentTime }
 const onMeta = () => { duration.value = audioRef.value.duration }
 const seek = () => { audioRef.value.currentTime = currentTime.value }
 const formatTime = (s) => `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`
-const onEnded = () => musicStore.nextTrack()
 </script>
-
 <style scoped>
-/* 1. 字体图标定义 */
+/* 1. 图标库 */
 @font-face {
     font-family: 'icomoon';
-    src: url('./fonts/icomoon.eot?k6rtfz');
-    src: url('./fonts/icomoon.eot?k6rtfz#iefix') format('embedded-opentype'),
-        url('./fonts/icomoon.ttf?k6rtfz') format('truetype'),
-        url('./fonts/icomoon.woff?k6rtfz') format('woff'),
-        url('./fonts/icomoon.svg?k6rtfz#icomoon') format('svg');
-    font-weight: normal;
-    font-style: normal;
-    font-display: block;
+    src: url('/fonts/icomoon.eot');
+    src: url('/fonts/icomoon.eot#iefix') format('embedded-opentype'),
+        url('/fonts/icomoon.ttf') format('truetype'),
+        url('/fonts/icomoon.woff') format('woff'),
+        url('/fonts/icomoon.svg#icomoon') format('svg');
 }
 
-/* 统一图标样式 */
 .icon-pre,
 .icon-next,
-.icon-list {
+.icon-list,
+.icon-delete {
     font-family: 'icomoon' !important;
     font-style: normal;
-    font-weight: normal;
-    font-variant: normal;
-    text-transform: none;
-    line-height: 1;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
     font-size: 24px;
     color: #fff;
 }
 
 .icon-pre::before {
     content: "\e905";
+    font-size: 26px;
 }
 
 .icon-next::before {
     content: "\e908";
+    font-size: 26px;
 }
 
-/* 请确认下一首在你的 icomoon 中是否是 e987 */
 .icon-list::before {
     content: "\e904";
 }
 
-/* 请确认列表在你的 icomoon 中是否是 e9ba */
+.icon-delete::before {
+    content: "\e909";
+}
 
-/* 2. 基础布局 */
+/* 2. 容器与背景 */
 .player-container {
     position: relative;
     width: 100vw;
-    height: 100vh;
+    height: 100dvh;
     overflow: hidden;
-    background-color: #0a0a0a;
+    background-color: #000;
     color: #fff;
-}
-
-.player-content {
-    position: relative;
-    z-index: 2;
-    height: 100%;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: space-between;
 }
 
 .background-blur {
     position: absolute;
-    inset: -20px;
+    inset: -10%;
     background-size: cover;
     background-position: center;
     filter: blur(50px) brightness(0.3);
@@ -245,53 +250,69 @@ const onEnded = () => musicStore.nextTrack()
 .background-overlay {
     position: absolute;
     inset: 0;
-    background: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.85) 100%);
     z-index: 1;
+    background: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.8) 100%);
 }
 
-/* 3. 唱片机 */
-.vinyl-display {
+/* 3. 首页布局优化 */
+.player-content {
+    position: relative;
+    z-index: 2;
+    flex: 1;
     display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    padding: 30px 0;
+}
+
+.vinyl-display {
+    flex: 1.5;
+    display: flex;
+    align-items: center;
     justify-content: center;
-    height: 45%;
-    margin-top: 10%;
+    width: 100%;
+    margin-top: 25px;
 }
 
 .vinyl-layout {
     position: relative;
-    width: 300px;
-    height: 300px;
+    width: min(75vw, 320px);
+    aspect-ratio: 1 / 1;
 }
 
 .disc {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
     width: 100%;
     height: 100%;
     border-radius: 50%;
     background: #111;
-    border: 10px solid #1a1a1a;
-    box-shadow: 0 25px 50px rgba(0, 0, 0, 0.8);
+    border: 8px solid #1a1a1a;
+    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.7);
     display: flex;
     align-items: center;
     justify-content: center;
 }
 
 .disc-vinyl {
-    width: 98%;
-    height: 98%;
+    width: 96%;
+    height: 96%;
     border-radius: 50%;
-    background: repeating-radial-gradient(circle, #111 0, #111 1px, #050505 2px);
+    background: repeating-radial-gradient(circle, #111 0, #111 2px, #080808 4px);
     display: flex;
     align-items: center;
     justify-content: center;
 }
 
 .disc-label {
-    width: 100px;
-    height: 100px;
+    width: 38%;
+    height: 38%;
     border-radius: 50%;
     border: 3px solid #000;
     overflow: hidden;
-    z-index: 2;
 }
 
 .disc-label img {
@@ -300,107 +321,109 @@ const onEnded = () => musicStore.nextTrack()
     object-fit: cover;
 }
 
+.stylus {
+    position: absolute;
+    top: -40px;
+    left: 50%;
+    width: 30px;
+    height: 100px;
+    z-index: 10;
+    transform-origin: 15px 15px;
+    transform: rotate(-65deg);
+    transition: transform 0.6s ease;
+}
+
+.stylus.is-playing {
+    transform: rotate(-30deg);
+}
+
+.stylus-pivot {
+    width: 30px;
+    height: 30px;
+    background: #444;
+    border-radius: 50%;
+}
+
+.stylus-arm {
+    width: 5px;
+    height: 90px;
+    background: #666;
+    margin: -5px auto 0;
+}
+
 .rotate {
     animation: rotateDisc 20s linear infinite;
 }
 
 @keyframes rotateDisc {
     from {
-        transform: rotate(0deg);
+        transform: translate(-50%, -50%) rotate(0deg);
     }
 
     to {
-        transform: rotate(360deg);
+        transform: translate(-50%, -50%) rotate(360deg);
     }
 }
 
-.stylus {
-    position: absolute;
-    top: -30px;
-    right: 20px;
-    width: 40px;
-    height: 120px;
-    z-index: 10;
-    transform-origin: 20px 20px;
-    transform: rotate(-40deg);
-    transition: transform 0.8s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.stylus.is-playing {
-    transform: rotate(5deg);
-}
-
-.stylus-pivot {
-    width: 40px;
-    height: 40px;
-    background: #333;
-    border-radius: 50%;
-    box-shadow: 0 4px 10px #000;
-}
-
-.stylus-arm {
-    width: 8px;
-    height: 100px;
-    background: #555;
-    margin: -5px auto 0;
-    border-radius: 4px;
-}
-
-.stylus-head {
-    width: 14px;
-    height: 24px;
-    background: #222;
-    margin: -5px auto 0;
-    border-radius: 3px;
-}
-
-/* 4. 信息与进度条 */
+/* 首页歌名控制：解决溢出换行 */
 .info-group {
     text-align: center;
+    padding: 0 12vw;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .song-name {
-    font-size: 1.6rem;
+    color: #fff;
     font-weight: 600;
     margin: 0;
+    font-size: clamp(1.2rem, 5vw, 1.8rem);
+    line-height: 1.4;
+    word-wrap: break-word;
+    word-break: break-all;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
 }
 
 .artist {
-    font-size: 0.95rem;
+    font-size: 0.9rem;
     color: rgba(255, 255, 255, 0.5);
-    margin-top: 6px;
+    margin-top: 8px;
 }
 
+/* 4. 进度条与按钮 */
 .progress-bar-group {
-    width: 100%;
+    width: 85%;
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 12px;
+    margin: 20px 0;
 }
 
 .time-label {
-    font-size: 0.75rem;
-    color: rgba(255, 255, 255, 0.4);
-    width: 40px;
-    text-align: center;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.3);
+    width: 35px;
 }
 
 .slider-track {
     flex: 1;
     position: relative;
-    height: 8px;
+    height: 4px;
     background: rgba(255, 255, 255, 0.1);
-    border-radius: 4px;
+    border-radius: 2px;
 }
 
 .range-input {
     position: absolute;
     inset: 0;
     width: 100%;
-    top: -11px;
+    top: -15px;
     opacity: 0;
     cursor: pointer;
-    z-index: 3;
+    z-index: 5;
 }
 
 .fill-bar {
@@ -409,83 +432,55 @@ const onEnded = () => musicStore.nextTrack()
     top: 0;
     height: 100%;
     background: #fff;
-    border-radius: 4px;
-    pointer-events: none;
-}
-
-.fill-bar::after {
-    content: '';
-    position: absolute;
-    right: -4px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 12px;
-    height: 12px;
-    background: #fff;
-    border-radius: 50%;
-    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
-}
-
-/* 5. 控制按钮 (统一背景) */
-.controls-group {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 15%;
+    border-radius: 2px;
 }
 
 .main-controls {
     display: flex;
     align-items: center;
-    gap: 35px;
-}
-
-.btn-main,
-.btn-secondary {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 0;
-    display: flex;
-    align-items: center;
+    justify-content: center;
+    gap: 8vw;
+    width: 100%;
 }
 
 .btn-play-state {
-    width: 64px;
-    height: 64px;
+    width: 65px;
+    height: 65px;
     border-radius: 50%;
     background: #fff;
-    border: none;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 8px 15px rgba(0, 0, 0, 0.3);
+    flex-shrink: 0;
 }
 
-/* 这里的暂停播放依然保留 CSS 绘图，因为你是黑色的实心图标 */
 .icon-play {
-    width: 0;
-    height: 0;
-    border-top: 10px solid transparent;
-    border-bottom: 10px solid transparent;
-    border-left: 16px solid #000;
-    margin-left: 4px;
+    border-top: 12px solid transparent;
+    border-bottom: 12px solid transparent;
+    border-left: 18px solid #000;
+    margin-left: 5px;
 }
 
 .icon-pause {
-    width: 16px;
-    height: 20px;
-    border-left: 5px solid #000;
-    border-right: 5px solid #000;
-    box-sizing: border-box;
+    width: 10px;
+    height: 22px;
+    border-left: 7px solid #000;
+    border-right: 7px solid #000;
 }
 
-/* 6. 播放列表 */
+button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #fff;
+    padding: 0;
+}
+
+/* 5. 播放列表：移动端核心修复 */
 .playlist-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.8);
+    background: rgba(0, 0, 0, 0.7);
     z-index: 100;
     display: flex;
     align-items: flex-end;
@@ -493,12 +488,13 @@ const onEnded = () => musicStore.nextTrack()
 
 .playlist-card {
     width: 100%;
-    height: 60%;
-    background: #181818;
+    height: 70vh;
+    background: #1a1a1a;
     border-radius: 24px 24px 0 0;
-    padding: 24px;
+    padding: 24px 20px;
     display: flex;
     flex-direction: column;
+    box-sizing: border-box;
 }
 
 .header {
@@ -506,28 +502,69 @@ const onEnded = () => musicStore.nextTrack()
     justify-content: space-between;
     align-items: center;
     margin-bottom: 20px;
-    color: #888;
-}
-
-.close-btn {
-    background: #333;
-    border: none;
-    color: #fff;
-    padding: 6px 16px;
-    border-radius: 18px;
 }
 
 .list-items {
     flex: 1;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
 }
 
+/* 列表项强行锁定两端 */
 .item {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 16px 0;
-    border-bottom: 1px solid #222;
+    justify-content: space-between;
+    padding: 14px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    width: 100%;
+    box-sizing: border-box;
+    gap: 10px;
+}
+
+.item-info {
+    flex: 1;
+    min-width: 0;
+    /* 允许收缩 */
+    display: flex;
+    flex-direction: column;
+}
+
+.item-title {
+    color: #fff;
+    font-size: 1rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+}
+
+.item-artist-sub {
+    font-size: 0.8rem;
+    color: #777;
+    margin-top: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.item-right {
+    flex-shrink: 0;
+    /* 禁止收缩，确保删除按钮不动 */
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    padding-left: 5px;
+}
+
+.item-del-btn {
+    width: 36px;
+    height: 36px;
+    color: #666;
+    font-size: 1.3rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .active .item-title {
@@ -535,69 +572,46 @@ const onEnded = () => musicStore.nextTrack()
     font-weight: bold;
 }
 
-.item-artist-sub {
-    font-size: 0.8rem;
-    color: #555;
+.add-track-btn {
     display: block;
-    margin-top: 4px;
-}
-
-.item-right {
-    display: flex;
-    align-items: center;
-    gap: 15px;
-}
-
-.item-del-btn {
+    margin: 25px 0 10px;
+    padding: 16px;
+    text-align: center;
     background: rgba(255, 255, 255, 0.05);
-    border: none;
-    color: #666;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    cursor: pointer;
+    border-radius: 12px;
+    color: #1db954;
+}
+
+.slide-enter-active,
+.slide-leave-active {
+    transition: transform 0.3s ease;
+}
+
+.slide-enter-from,
+.slide-leave-to {
+    transform: translateY(100%);
 }
 
 .playing-bars {
     display: flex;
     gap: 2px;
     align-items: flex-end;
-    height: 14px;
+    height: 12px;
 }
 
 .playing-bars span {
-    width: 3px;
+    width: 2px;
     background: #1db954;
-    animation: barUp 0.5s ease-in-out infinite alternate;
+    animation: barUp 0.6s infinite alternate;
 }
 
 @keyframes barUp {
     from {
-        height: 4px;
+        height: 2px;
     }
 
     to {
-        height: 14px;
+        height: 12px;
     }
-}
-
-.add-track-btn {
-    display: block;
-    text-align: center;
-    padding: 20px;
-    color: #555;
-    border: 1px dashed #333;
-    border-radius: 12px;
-    margin-top: 20px;
-}
-
-.slide-enter-active,
-.slide-leave-active {
-    transition: 0.4s ease;
-}
-
-.slide-enter-from,
-.slide-leave-to {
-    transform: translateY(100%);
 }
 </style>
